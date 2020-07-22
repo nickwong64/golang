@@ -135,7 +135,7 @@ func numRecordExist(db *sql.DB) {
 }
 
 func main() {
-	cnxStr := "tds://sscadm:New_DB0@lis-ssc-sd1:32601/SSC_DB?charset=utf8"
+	cnxStr := "tds://user:password@servername:port/SSC_DB?charset=utf8"
 	db, err := sql.Open("tds", cnxStr)
 	if err != nil {
 		log.Fatal(err)

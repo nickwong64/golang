@@ -15,14 +15,17 @@ import (
 
 // syslog struct to insert
 type syslog struct {
-	server_name  string
-	DBName       string
-	loginame     string
-	SPID         int
+	DB           string
+	dbid         int
+	reserved     int
+	spid         int
+	page         int
+	xactid       string
+	masterxactid string
 	starttime    string
-	starttime_ms int
 	name         string
-	//log_datetime string
+	xloid        int
+	log_datetime string
 }
 
 // server list to check syslog
@@ -41,14 +44,14 @@ func insert_clickhouse(db *sql.DB, sls []syslog) {
 		log.Println(err)
 	}
 
-	stmt, err := tx.Prepare("insert into syslogshold  values (?, ?, ?, ?, ?, ?, ?, now())")
+	stmt, err := tx.Prepare("insert into syslogshold  values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		log.Println(err)
 	}
 
 	for _, sl := range sls {
 		// change the insert SQL here
-		_, err = stmt.Exec(sl.server_name, sl.DBName, sl.loginame, sl.SPID, sl.starttime, sl.starttime_ms, sl.name)
+		_, err = stmt.Exec(sl.DB, sl.dbid, sl.reserved, sl.spid, sl.page, sl.xactid, sl.masterxactid, sl.starttime, sl.name, sl.xloid, sl.log_datetime)
 		if err != nil {
 			log.Println(err)
 		}
@@ -106,15 +109,17 @@ func read_from_sybase(wg *sync.WaitGroup, servers <-chan server, syslogs chan<- 
 
 	for srv := range servers {
 		var (
-			servername       string
-			loginame         string
-			db_name          string
-			spid             int
-			loggedindatetime time.Time
-			hostname         string
-			ipaddr           string
-			hostprocess      string
-			log_datetime     time.Time
+			DB           string
+			dbid         int
+			reserved     int
+			spid         int
+			page         int
+			xactid       string
+			masterxactid string
+			starttime    time.Time
+			name         string
+			xloid        int
+			log_datetime time.Time
 		)
 
 		var sls []syslog
@@ -129,33 +134,34 @@ func read_from_sybase(wg *sync.WaitGroup, servers <-chan server, syslogs chan<- 
 		//ping if db alive, channel to errors or to syslogs
 		err = dbTDS.Ping()
 		if err != nil {
-			log.Println(err)
+			//log.Println(err)
 			errors <- err
 		} else {
 
 			//change the SQL to check syslogs here
-			rows, err1 := dbTDS.Query("select distinct @@servername 'server', l.name loginame, db_name(p.dbid) DB, p.spid, " +
-				"p. loggedindatetime, coalesce(p.hostname, '') 'hostname', p.ipaddr, p.hostprocess, getdate() log_datetime " +
-				"from master..sysprocesses p, master..syslogins l where p.suid = l.suid")
+			rows, err1 := dbTDS.Query("select db_name(dbid) DB, l.*, getdate() log_datetime from master..syslogshold l " +
+				"where l.name like '%replication_truncation_point%'")
 			if err1 != nil {
 				//log.Println(err1)
+				//log.Println("can see me?")
 				errors <- err1
-			}
+			} else {
 
-			for rows.Next() {
-				err2 := rows.Scan(&servername, &loginame, &db_name, &spid, &loggedindatetime, &hostname, &ipaddr, &hostprocess, &log_datetime)
-				if err2 != nil {
-					log.Println(err2)
-					continue
+				for rows.Next() {
+					err2 := rows.Scan(&DB, &dbid, &reserved, &spid, &page, &xactid, &masterxactid, &starttime, &name, &xloid, &log_datetime)
+					if err2 != nil {
+						log.Println(err2)
+					} else {
+
+						sl := syslog{DB: DB, dbid: dbid, reserved: reserved, spid: spid, page: page, xactid: xactid, masterxactid: masterxactid, starttime: starttime.Format("2006-01-02 15:04:05"), name: name, xloid: xloid, log_datetime: log_datetime.Format("2006-01-02 15:04:05")}
+						sls = append(sls, sl)
+					}
+
 				}
 
-				sl := syslog{server_name: servername, DBName: db_name, loginame: loginame, SPID: spid, starttime: log_datetime.Format("2006-01-02 15:04:05"), starttime_ms: 500, name: hostname}
-				sls = append(sls, sl)
-
+				rows.Close()
+				syslogs <- sls
 			}
-
-			rows.Close()
-			syslogs <- sls
 		}
 
 		wg.Done()
@@ -173,7 +179,7 @@ func main() {
 	var syslogs []syslog
 
 	//connection for Sybase to read servers list
-	cnxTDSStr := "tds://user:password@lis-ssc-sd1:32601/SSC_DB?charset=utf8"
+	cnxTDSStr := "tds://user:password0@lis-ssc-sd1:32601/SSC_DB?charset=utf8"
 	dbServers, err := sql.Open("tds", cnxTDSStr)
 	if err != nil {
 		log.Println(err)
@@ -191,7 +197,7 @@ func main() {
 	// read the server list
 	servers = read_servers(dbServers)
 
-	num := len(servers)
+	num := len(servers[:])
 	fmt.Println("number of servers ", strconv.Itoa(num))
 	// make channels for server, syslog and errors
 	chan_server := make(chan server, num)
@@ -205,7 +211,7 @@ func main() {
 	}
 
 	// setup channel servers
-	for _, s := range servers {
+	for _, s := range servers[:] {
 		chan_server <- s
 		wg.Add(1)
 	}

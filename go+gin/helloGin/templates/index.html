@@ -1,0 +1,28 @@
+<!--index.html-->
+
+<!--Embed the header.html template at this location-->
+{{ template "header.html" .}}
+
+  <h1>Hello Gin!</h1>
+  <table border="1" width="100%">
+    <thead>
+    <tr>
+      <td width="33%">Server</td>
+      <td width="33%">DNS name</td>
+      <td width="33%">Port</td>
+    </tr>
+     </thead>
+     <tbody>
+  {{ range .servers }}
+    <tr>
+      <td>{{ .Server_name }}</td>
+      <td> {{ .Server_dns_name }} </td>
+      <td>{{ .Port }} </td> 
+    </tr>
+  {{ end }}
+     </tbody>
+  </table>
+
+
+<!--Embed the footer.html template at this location-->
+{{ template "footer.html" .}}

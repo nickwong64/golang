@@ -8,64 +8,31 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"sync"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	_ "github.com/thda/tds"
 )
 
-// server list, need to start with capital letter so that other file in same package can use!
+// Server struct
 type Server struct {
 	Server_name     string
 	Server_dns_name string
-	Port            int
+	Port_no         string
 }
 
-//read servers list
-func read_servers() []Server {
+// Raw Result from query
+type Result struct {
+	Srv     Server
+	BResult [][]byte
+}
 
-	var (
-		server_name     string
-		server_dns_name string
-		port            int
-	)
-
-	var servers []Server
-
-	//connection for Sybase to read servers list
-	cnxTDSStr := "tds://sscadm:New_DB0@lis-ssc-sd1:32601/SSC_DB?charset=utf8"
-	db, err := sql.Open("tds", cnxTDSStr)
-	if err != nil {
-		log.Println(err)
-	}
-
-	defer db.Close()
-	// read the server list
-
-	// sql to read server list for sybase
-	rows, err := db.Query("select server_name, server_dns_name, port_no from ssc_server where " +
-		"environment = 'T' and server_type = 'SYBASE_ASE' and is_active = 'Y' " +
-		"and server_name like 'LIS[_]%[_]%' " +
-		"and substring(server_name, 5, 3) not in ('ALS', 'PCC', 'PCJ', 'SIT', 'VH5') " +
-		"and server_name not like '%ST13%' " +
-		"order by server_dns_name, server_name")
-	if err != nil {
-		log.Println(err)
-	}
-
-	for rows.Next() {
-		err = rows.Scan(&server_name, &server_dns_name, &port)
-		if err != nil {
-			fmt.Println("Failed to scan row", err)
-			return nil
-		}
-
-		svr := Server{Server_name: server_name, Server_dns_name: server_dns_name, Port: port}
-		servers = append(servers, svr)
-	}
-
-	defer rows.Close()
-
-	return servers
+// Final Result from query
+type FResult struct {
+	Srv     Server
+	FResult []interface{}
 }
 
 func render(c *gin.Context, data gin.H, templateName string) {
@@ -84,130 +51,172 @@ func render(c *gin.Context, data gin.H, templateName string) {
 
 }
 
-func runQuery(query string) []byte {
+//read servers list
+func readServers() (interface{}, error) {
 
-	var z []byte
-	cnxStr := "tds://sscadm:New_DB0@lis-ssc-sd1:32601/SSC_DB?charset=utf8"
+	server := Server{Server_name: "SSC_DB", Server_dns_name: "lis-ssc-sd1", Port_no: "32601"}
+
+	query := "select distinct server_name, server_dns_name, port_no from ssc_server where " +
+		"environment = 'T' and server_type = 'SYBASE_ASE' and is_active = 'Y' " +
+		"and server_name like 'LIS[_]%[_]%' " +
+		"and substring(server_name, 5, 3) not in ('ALS', 'PCC', 'PCJ', 'SIT', 'VH5') " +
+		"and server_name not like '%ST13%' " +
+		"order by server_dns_name, server_name"
+
+	return runQuery(query, server, "user", "pass", "SSC_DB")
+
+}
+
+// concurrent run query setup
+func conrunQuery(wg *sync.WaitGroup, servers <-chan Server, results chan<- FResult, errors chan<- error, query string) {
+	for srv := range servers {
+		res, err := runQuery(query, srv, "user", "pass", "master")
+		if res != nil {
+			var r FResult
+			r.Srv = srv
+			r.FResult = res
+			results <- r
+		} else if err != nil {
+			errors <- err
+		}
+
+		wg.Done()
+	}
+
+}
+
+// run a single query
+func runQuery(query string, srv Server, user string, pass string, dbc string) ([]interface{}, error) {
+
+	// var z []byte
+	var zz []interface{}
+	cnxStr := fmt.Sprintf("tds://" + user + ":" + pass + "@" + srv.Server_dns_name + ":" + srv.Port_no + "/" + dbc + "?charset=cp850")
 	db, err := sql.Open("tds", cnxStr)
 	if err != nil {
 		log.Println(err)
+		return nil, err
 	}
 
-	rows, err := db.Query(query)
+	err = db.Ping()
 	if err != nil {
 		log.Println(err)
-	}
-	defer rows.Close()
+		return nil, err
+	} else {
 
-	for n := 0; n < 10; n++ {
-		fmt.Println(n)
-		columnTypes, err := rows.ColumnTypes()
-
+		rows, err := db.Query(query)
 		if err != nil {
 			log.Println(err)
+			return nil, err
 		}
+		defer rows.Close()
 
-		count := len(columnTypes)
-		finalRows := []interface{}{}
-
-		for rows.Next() {
-
-			scanArgs := make([]interface{}, count)
-
-			for i, v := range columnTypes {
-
-				switch v.DatabaseTypeName() {
-				case "VARCHAR", "TEXT", "UUID", "TIMESTAMP":
-					scanArgs[i] = new(sql.NullString)
-					break
-				case "BOOL":
-					scanArgs[i] = new(sql.NullBool)
-					break
-				case "INT4":
-					scanArgs[i] = new(sql.NullInt64)
-					break
-				default:
-					scanArgs[i] = new(sql.NullString)
-				}
-			}
-
-			err := rows.Scan(scanArgs...)
+		for n := 0; n < 10; n++ {
+			fmt.Println(n)
+			columnTypes, err := rows.ColumnTypes()
+			columns, err := rows.Columns()
+			//fmt.Printf("%#v\n", columns)
 
 			if err != nil {
 				log.Println(err)
+				return nil, err
 			}
 
-			masterData := map[string]interface{}{}
+			count := len(columnTypes)
+			finalRows := []interface{}{}
 
-			for i, v := range columnTypes {
+			for rows.Next() {
 
-				if z, ok := (scanArgs[i]).(*sql.NullBool); ok {
-					masterData[v.Name()] = z.Bool
-					continue
+				scanArgs := make([]interface{}, count)
+
+				for i, v := range columnTypes {
+
+					switch v.DatabaseTypeName() {
+					case "VARCHAR", "TEXT", "UUID", "TIMESTAMP":
+						scanArgs[i] = new(sql.NullString)
+						break
+					case "BOOL":
+						scanArgs[i] = new(sql.NullBool)
+						break
+					case "INT4":
+						scanArgs[i] = new(sql.NullInt64)
+						break
+					default:
+						scanArgs[i] = new(sql.NullString)
+					}
 				}
 
-				if z, ok := (scanArgs[i]).(*sql.NullString); ok {
-					masterData[v.Name()] = z.String
-					continue
+				err := rows.Scan(scanArgs...)
+
+				if err != nil {
+					log.Println(err)
+					return nil, err
 				}
 
-				if z, ok := (scanArgs[i]).(*sql.NullInt64); ok {
-					masterData[v.Name()] = z.Int64
-					continue
+				masterData := map[string]interface{}{}
+
+				for i, v := range columns {
+
+					if z, ok := (scanArgs[i]).(*sql.NullBool); ok {
+						masterData[v] = z.Bool
+						continue
+					}
+
+					if z, ok := (scanArgs[i]).(*sql.NullString); ok {
+						masterData[v] = z.String
+						continue
+					}
+
+					if z, ok := (scanArgs[i]).(*sql.NullInt64); ok {
+						masterData[v] = z.Int64
+						continue
+					}
+
+					if z, ok := (scanArgs[i]).(*sql.NullFloat64); ok {
+						masterData[v] = z.Float64
+						continue
+					}
+
+					if z, ok := (scanArgs[i]).(*sql.NullInt32); ok {
+						masterData[v] = z.Int32
+						continue
+					}
+
+					masterData[v] = scanArgs[i]
 				}
 
-				if z, ok := (scanArgs[i]).(*sql.NullFloat64); ok {
-					masterData[v.Name()] = z.Float64
-					continue
-				}
-
-				if z, ok := (scanArgs[i]).(*sql.NullInt32); ok {
-					masterData[v.Name()] = z.Int32
-					continue
-				}
-
-				masterData[v.Name()] = scanArgs[i]
+				finalRows = append(finalRows, masterData)
+				//fmt.Printf("%#v\n", masterData)
 			}
 
-			finalRows = append(finalRows, masterData)
+			//z, err = json.Marshal(finalRows)
+
+			zz = append(zz, finalRows)
+
+			// check if have next result set, break if no
+			next := rows.NextResultSet()
+			fmt.Println("have next? ", next)
+			if !next {
+				//cls
+				//fmt.Printf(string(z))
+
+				break
+			}
 		}
 
-		z, err = json.Marshal(finalRows)
-
-		// check if have next result set, break if no
-		next := rows.NextResultSet()
-		fmt.Println("have next? ", next)
-		if !next {
-			fmt.Printf(string(z))
-			break
-		}
+		rows.Close()
+		return zz, nil
 	}
-
-	return z
 }
 
-func showQueryResultJson(c *gin.Context) {
+// show servers list as JSON
+func showServers(c *gin.Context) {
 
-	var r interface{}
-	query := c.Param("sql")
-	results := runQuery(query)
-	err := json.Unmarshal(results, &r)
+	servers, err := readServers()
 	if err != nil {
 		log.Println(err)
 	}
-	c.JSON(http.StatusOK, r)
-}
 
-func showQueryResult(c *gin.Context) {
-
-	var r interface{}
-	query := c.Param("sql")
-	results := runQuery(query)
-	err := json.Unmarshal(results, &r)
-	if err != nil {
-		log.Println(err)
-	}
-	c.HTML(http.StatusOK, "query.html", r)
+	c.JSON(http.StatusOK, servers)
 }
 
 var router *gin.Engine
@@ -216,6 +225,8 @@ func main() {
 	// Set the router as the default one provided by Gin
 	router = gin.Default()
 
+	router.Use(cors.Default())
+
 	// Process the templates at the start so that they don't have to be loaded
 	// from the disk again. This makes serving HTML pages very fast.
 	router.LoadHTMLGlob("templates/*")
@@ -223,7 +234,10 @@ func main() {
 
 	router.GET("/", func(c *gin.Context) {
 
-		servers := read_servers()
+		servers, err := readServers()
+		if err != nil {
+			log.Println(err)
+		}
 
 		render(c, gin.H{
 			"title":   "LIS Test",
@@ -231,6 +245,10 @@ func main() {
 
 	})
 
+	// get server list api
+	router.GET("/query/servers", showServers)
+
+	// query page
 	router.GET("/query", func(c *gin.Context) {
 
 		render(c, gin.H{
@@ -239,30 +257,60 @@ func main() {
 
 	})
 
-	router.GET("/query/view", func(c *gin.Context) {
+	// submit query api
+	router.POST("/query/submit", func(c *gin.Context) {
+		fmt.Println("query submitted")
+		var servers []Server
+		var frs1 []FResult
 
-		render(c, gin.H{
-			"title": "LIS Query",
-		}, "query.html")
+		//query from post form data
+		query := c.PostForm("q")
+		// server list from post form data
+		serversJson := c.PostForm("s")
 
-	})
-
-	router.GET("/query/json/:sql", showQueryResultJson)
-
-	router.GET("/query/view/:sql", func(c *gin.Context) {
-
-		var r interface{}
-		query := c.Param("sql")
-		results := runQuery(query)
-		err := json.Unmarshal(results, &r)
+		err := json.Unmarshal([]byte(serversJson), &servers)
 		if err != nil {
 			log.Println(err)
 		}
+		//fmt.Println("Query : ", query)
+		//fmt.Printf("Servers : %#v", servers)
 
-		render(c, gin.H{
-			"title":   "LIS Query",
-			"results": r,
-		}, "query.html")
+		// below start goroutine to run query
+		num := len(servers)
+		chan_server := make(chan Server, num)
+		chan_Result := make(chan FResult, num)
+		errors := make(chan error, 100)
+
+		var wg sync.WaitGroup
+		for w := 1; w <= 20; w++ {
+			go conrunQuery(&wg, chan_server, chan_Result, errors, query)
+		}
+
+		for _, s := range servers {
+			chan_server <- s
+			wg.Add(1)
+		}
+
+		close(chan_server)
+
+		wg.Wait()
+
+		for a := 1; a <= num; a++ {
+			select {
+			case err := <-errors:
+				fmt.Println("have errors:", err.Error())
+			case res := <-chan_Result:
+				frs1 = append(frs1, res)
+				fmt.Println("**********")
+			}
+		}
+
+		//fmt.Println(frs)
+		// sort based on the Server_name
+		sort.Slice(frs1[:], func(i, j int) bool {
+			return frs1[i].Srv.Server_name < frs1[j].Srv.Server_name
+		})
+		c.JSON(http.StatusOK, frs1)
 
 	})
 

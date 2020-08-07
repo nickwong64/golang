@@ -1,11 +1,78 @@
-<!--menu.html-->
+<script>
+function filterServers() {
+    var input, filter, ul, li, a, i, txtValue;
+    var servers = [];
+      
+    input = document.getElementById("search");
+    filter = input.value.toUpperCase();
+    ul = document.getElementById("servers");
+    li = ul.getElementsByTagName("li");
+    for (i = 0; i < li.length; i++) {
+        a = li[i].getElementsByTagName("a")[0];
+        txtValue = a.textContent || a.innerText;
+        if (txtValue.toUpperCase().indexOf(filter) > -1) {
+            li[i].style.display = "";
+            let server = {Server_name:"", Server_dns_name:"", Port_no:""};
+            server.Server_name = li[i].innerText.split(" : ")[0];
+            var details = li[i].innerText.split(" : ")[1];
+            server.Server_dns_name = details.split(", ")[0];
+            server.Port_no = details.split(", ")[1];
+            servers.push(server);
+        } else {
+            li[i].style.display = "none";
+        }
+    }
+    console.log(servers);
+    return servers;
+}
 
-<nav class="navbar navbar-default">
-  <div class="container">
-    <div class="navbar-header">
-      <a class="navbar-brand" href="/">
-        Home
-      </a>
-    </div>
-  </div>
-</nav>
+</script>
+
+<div class="col-sm-2">
+<div class="well bs-sidebar" id="sidebar" style="background-color:#EBEFF4">
+
+    <input type="text" id="search" class="form-control" onkeyup="filterServers()" placeholder="Search for DB.." title="Search for DB">
+    <p></p>
+  <ul class="list-group" id="servers">		  
+  
+  
+  </ul>
+</div> <!--well bs-sidebar affix-->
+</div>
+
+<script>
+// create an html element
+function createNode(element) {
+    return document.createElement(element);
+}
+
+// append an elment to its parent
+function append(parent, el) {
+    return parent.appendChild(el);
+}
+
+const ul = document.getElementById("servers");
+const url = "http://localhost:8080/query/servers";
+fetch(url)
+    .then((resp) => resp.json())
+        .then(function(data) {
+      
+            // need to get data[0], as the json returned is array of array [[]]
+            let servers = data[0];
+            return servers.map(function(server) {
+            //console.log(server.server_name);
+            //console.log(server.server_dns_name + ', ' + server.port_no);
+            let li = createNode("li");
+            li.setAttribute("class", "list-group-item");
+            let a = createNode("a");
+            a.setAttribute("href", "#");
+            a.innerText = server.server_name + " : " + server.server_dns_name + ', ' + server.port_no
+            append(li, a);
+            append(ul, li);
+        }) 
+       
+    })
+.catch(function (error) {
+    console.log(error);
+});
+</script>
